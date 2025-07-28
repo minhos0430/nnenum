@@ -7,10 +7,8 @@ Gurobi python interface for nnenum.
 '''
 
 import time
-
 import numpy as np
 from types import SimpleNamespace
-
 import gurobipy as gp
 from gurobipy import GRB
 
@@ -22,18 +20,15 @@ class LpInstance(Freezable):
 
     def __init__(self, other_lpi=None):
         'initialize the lp instance'
-
-        # Create a Gurobi environment with output suppressed
         env = gp.Env(empty=True)
         env.setParam('OutputFlag', 0)
         env.start()
 
         if other_lpi is None:
             self.lp = gp.Model(env=env)
-            # internal bookkeeping
-            self.names = [] # column names
+            self.names = []
         else:
-            # initialize from other lpi
+            other_lpi.deserialize()
             Timers.tic('gurobi_copy_prob')
             self.lp = other_lpi.lp.copy()
             self.names = other_lpi.names.copy()
@@ -42,53 +37,51 @@ class LpInstance(Freezable):
         self.freeze_attrs()
 
     def __del__(self):
-        if hasattr(self, 'lp') and self.lp is not None:
+        if hasattr(self, 'lp') and self.lp is not None and not isinstance(self.lp, tuple):
             self.lp.dispose()
             self.lp = None
 
     def serialize(self):
-        'Serialize self.lp into a tuple of NumPy arrays for multiprocessing'
-        
+        'Serialize self.lp into a tuple for multiprocessing'
+        self.deserialize()
         Timers.tic('serialize')
         
-        # Get objective
-        c = self.lp.getAttr('Obj', self.lp.getVars())
-
-        # Get constraints
+        variables = self.lp.getVars()
+        num_cols = len(variables)
+        
+        if self.lp.getObjective() is not None:
+             c = self.lp.getAttr('Obj', variables)
+        else:
+             c = []
+             
         constrs = self.lp.getConstrs()
         A_list = []
         b_list = []
         
         for constr in constrs:
-            row = self.lp.getRow(constr)
-            # Assuming all are '<=' constraints as per original GLPK logic
-            # Gurobi's getRow returns a sparse representation
-            row_coeffs = np.zeros(self.get_num_cols())
-            for i in range(row.size()):
-                var_index = row.getVar(i).index
-                row_coeffs[var_index] = row.getCoeff(i)
+            row_coeffs = np.zeros(num_cols)
+            row_expr = self.lp.getRow(constr)
+            for i in range(row_expr.size()):
+                var = row_expr.getVar(i)
+                coeff = row_expr.getCoeff(i)
+                row_coeffs[var.index] = coeff
             A_list.append(row_coeffs)
             b_list.append(constr.RHS)
             
-        A = np.array(A_list) if A_list else None
-        b = np.array(b_list) if b_list else None
-
-        # Get bounds
-        bounds = [(v.LB, v.UB) for v in self.lp.getVars()]
+        A = np.array(A_list) if A_list else np.array([])
+        b = np.array(b_list) if b_list else np.array([])
+        bounds = [(v.LB, v.UB) for v in variables]
 
         self.lp.dispose()
-        # NOTE: For simplicity, this serialization assumes only <= constraints
-        # and doesn't separate equality/inequality constraints.
         self.lp = (c, A, b, bounds, self.names)
-        
         Timers.toc('serialize')
 
     def deserialize(self):
         'Deserialize self.lp from a tuple into a Gurobi model'
+        if not isinstance(self.lp, tuple):
+            return
         
-        assert isinstance(self.lp, tuple), "LP is not in serialized form"
         Timers.tic('deserialize')
-        
         c, A, b, bounds, names = self.lp
 
         env = gp.Env(empty=True)
@@ -98,105 +91,85 @@ class LpInstance(Freezable):
         self.lp = gp.Model(env=env)
         self.names = names
 
-        # Add variables with bounds
-        x = self.lp.addMVar(shape=len(c), lb=[b[0] for b in bounds], ub=[b[1] for b in bounds])
+        num_vars = len(bounds)
         
-        # Add constraints
-        if A is not None and A.size > 0:
+        if num_vars == 0:
+            Timers.toc('deserialize')
+            return
+
+        var_names = names if len(names) == num_vars else [f"C{i}" for i in range(num_vars)]
+        x = self.lp.addMVar(shape=num_vars, lb=[b[0] for b in bounds], ub=[b[1] for b in bounds], name=var_names)
+        self.lp.update()
+        
+        if A.size > 0:
             self.lp.addConstr(A @ x <= b)
-            
-        # The objective is set during minimize(), so we don't set it here.
         
+        if len(c) == num_vars:
+            new_vars = self.lp.getVars()
+            self.lp.setObjective(gp.LinExpr(c, new_vars), GRB.MINIMIZE)
+            
+        self.lp.update()
         Timers.toc('deserialize')
 
     def get_num_rows(self):
-        'get the number of rows in the lp'
+        self.deserialize()
         return self.lp.numConstrs
 
     def get_num_cols(self):
-        'get the number of columns in the lp'
+        self.deserialize()
         return self.lp.numVars
     
-    def add_rows_less_equal(self, rhs_vec):
-        'Adds empty rows, constraints are set later'
-        if not isinstance(rhs_vec, list):
-            rhs_vec = list(rhs_vec)
-        
-        # In Gurobi, rows are added with constraints simultaneously.
-        # This function is a bit tricky to map directly. We'll assume
-        # set_constraints_csr or add_dense_row will be called later.
-        # For now, we just acknowledge the number of rows that will be added.
-        pass
-
     def add_cols_from_names(self, names, lb, ub):
-        'Helper to add columns with shared bounds'
-        assert isinstance(names, list)
+        self.deserialize()
         if not names:
-            return
-        
-        self.lp.addVars(len(names), lb=lb, ub=ub)
-        self.lp.update() # update model to reflect changes
+            return []
+        new_vars = self.lp.addVars(names, lb=lb, ub=ub)
+        self.lp.update()
         self.names.extend(names)
+        return new_vars.values()
         
     def add_positive_cols(self, names):
-        'add a certain number of columns to the LP with positive bounds [0, inf)'
-        self.add_cols_from_names(names, lb=0.0, ub=GRB.INFINITY)
+        return self.add_cols_from_names(names, lb=0.0, ub=GRB.INFINITY)
         
     def add_cols(self, names):
-        'add a certain number of columns to the LP, free variables (-inf, inf)'
-        self.add_cols_from_names(names, lb=-GRB.INFINITY, ub=GRB.INFINITY)
+        return self.add_cols_from_names(names, lb=-GRB.INFINITY, ub=GRB.INFINITY)
 
     def add_double_bounded_cols(self, names, lb, ub):
-        'add columns with the given lower and upper bound'
-        self.add_cols_from_names(names, lb=float(lb), ub=float(ub))
+        return self.add_cols_from_names(names, lb=float(lb), ub=float(ub))
         
     def add_dense_row(self, vec, rhs, normalize=True):
-        'add a row from a dense nd.array, row <= rhs'
+        self.deserialize()
         Timers.tic('add_dense_row')
         
         num_cols = self.get_num_cols()
-        assert len(vec) == num_cols
+        assert len(vec) == num_cols, f"Vector length {len(vec)} does not match number of columns {num_cols}"
         
-        # Normalization logic can be kept if desired
         if normalize:
             norm = np.linalg.norm(vec)
             if norm > 1e-9:
                 vec = vec / norm
                 rhs = rhs / norm
                 
-        variables = self.lp.getVars()
-        expr = gp.LinExpr(vec, variables)
-        self.lp.addConstr(expr <= rhs)
-
+        self.lp.addConstr(gp.LinExpr(vec, self.lp.getVars()) <= rhs)
         Timers.toc('add_dense_row')
 
-    def set_constraints_csr(self, data, indices, indptr, shape):
-        'Sets constraints from a CSR-like format'
-        # This method is complex to translate directly and efficiently without
-        # building the matrix first. Gurobi's API is better with `addConstr`.
-        # The current implementation will rely on `add_dense_row`.
-        # This part may need further optimization if it becomes a bottleneck.
-        pass
-
     def set_minimize_direction(self, direction_vec):
-        'set the optimization direction'
+        self.deserialize()
         num_cols = self.get_num_cols()
         assert len(direction_vec) == num_cols
         
-        variables = self.lp.getVars()
-        expr = gp.LinExpr(direction_vec, variables)
-        self.lp.setObjective(expr, GRB.MINIMIZE)
+        self.lp.setObjective(gp.LinExpr(direction_vec, self.lp.getVars()), GRB.MINIMIZE)
 
     def minimize(self, direction_vec, fail_on_unsat=True):
-        '''minimize the lp, returning a list of assigments to each of the variables
-        returns None if UNSAT, otherwise the optimization result.
-        '''
-        assert not isinstance(self.lp, tuple), "self.lp was tuple. Did you call lpi.deserialize()?"
+        self.deserialize()
         Timers.tic('gurobi_minimize')
 
+        if self.lp.numVars > 0 and self.lp.getObjective() is None and direction_vec is None:
+            self.lp.setObjective(0, GRB.MINIMIZE)
+        
         if direction_vec is not None:
             self.set_minimize_direction(direction_vec)
-
+        
         self.lp.optimize()
         
         status = self.lp.status
@@ -204,15 +177,9 @@ class LpInstance(Freezable):
 
         if status == GRB.OPTIMAL:
             rv = np.array(self.lp.getAttr('X', self.lp.getVars()))
-        elif status == GRB.INFEASIBLE:
-            rv = None
-        elif status == GRB.UNBOUNDED:
-            # An unbounded problem still has a feasible solution (the direction of the ray)
-            # but for verification purposes, this often means the property is violated.
-            # Depending on the calling context, we might return None or raise an error.
-            # Returning None is safer to indicate no finite optimal solution was found.
+        elif status in [GRB.INFEASIBLE, GRB.UNBOUNDED]:
             rv = None 
-        else: # Other statuses like TIME_LIMIT, etc.
+        else:
             print(f"Gurobi finished with unhandled status: {status}")
             rv = None
 
