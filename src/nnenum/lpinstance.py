@@ -52,7 +52,7 @@ class LpInstance(Freezable):
         Timers.tic('serialize')
         
         # Get objective
-        c = self.lp.getAttr('ObjC', self.lp.getVars())
+        c = self.lp.getAttr('Obj', self.lp.getVars())
 
         # Get constraints
         constrs = self.lp.getConstrs()
