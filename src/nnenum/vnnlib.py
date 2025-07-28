@@ -126,37 +126,48 @@ def make_input_box_dict(num_inputs):
     return rv
 
 def get_io_nodes(onnx_model):
-    'returns 3 -tuple: input node, output nodes, input dtype'
+    """Get the input and output nodes of the onnx model."""
+    # MODIFIED: Use the lightweight 'onnx' library to avoid creating an
+    # InferenceSession, which can crash in restricted environments.
+    import onnx
+    import numpy as np
 
-    sess = ort.InferenceSession(onnx_model.SerializeToString())
-    inputs = [i.name for i in sess.get_inputs()]
-    assert len(inputs) == 1, f"expected single onnx network input, got: {inputs}"
-    input_name = inputs[0]
+    inp = onnx_model.graph.input
+    out = onnx_model.graph.output
 
-    outputs = [o.name for o in sess.get_outputs()]
-    assert len(outputs) == 1, f"expected single onnx network output, got: {outputs}"
-    output_name = outputs[0]
+    if not inp:
+        raise ValueError("Model has no inputs")
 
-    g = onnx_model.graph
-    inp = [n for n in g.input if n.name == input_name][0]
-    out = [n for n in g.output if n.name == output_name][0]
+    input_type = inp[0].type.tensor_type
+    
+    if input_type.elem_type == onnx.TensorProto.FLOAT:
+        inp_dtype = np.float32
+    elif input_type.elem_type == onnx.TensorProto.DOUBLE:
+        inp_dtype = np.float64
+    elif input_type.elem_type == onnx.TensorProto.INT64:
+        inp_dtype = np.int64
+    elif input_type.elem_type == onnx.TensorProto.INT32:
+        inp_dtype = np.int32
+    else:
+        # Add other types if needed, otherwise default or raise error
+        raise ValueError(f"Unsupported input type: {input_type.elem_type}")
 
-    input_type = g.input[0].type.tensor_type.elem_type
-
-    assert input_type in [onnx.TensorProto.FLOAT, onnx.TensorProto.DOUBLE]
-
-    dtype = np.float32 if input_type == onnx.TensorProto.FLOAT else np.float64
-
-    return inp, out, dtype
+    return inp, out, inp_dtype
 
 def get_num_inputs_outputs(onnx_filename):
     'get num inputs, num outputs, and input dtype of an onnx file'
 
     onnx_model = onnx.load(onnx_filename)
+    # The 'inp' and 'out' variables are lists of nodes
     inp, out, inp_dtype = get_io_nodes(onnx_model)
     
-    inp_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in inp.type.tensor_type.shape.dim)
-    out_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in out.type.tensor_type.shape.dim)
+    # Get the first node from each list
+    # The tool assumes a single input/output tensor
+    first_inp = inp[0]
+    first_out = out[0]
+    
+    inp_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in first_inp.type.tensor_type.shape.dim)
+    out_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in first_out.type.tensor_type.shape.dim)
 
     num_inputs = 1
     num_outputs = 1
