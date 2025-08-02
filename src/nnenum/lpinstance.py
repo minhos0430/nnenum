@@ -21,11 +21,12 @@ class LpInstance(Freezable):
     def __init__(self, other_lpi=None):
         'initialize the lp instance'
         env = gp.Env(empty=True)
-        env.setParam('OutputFlag', 0)
+        env.setParam('OutputFlag', 0) # ADDED BACK: Silence Gurobi's console output
         env.start()
 
         if other_lpi is None:
             self.lp = gp.Model(env=env)
+            self.lp.setParam('NumericFocus', 3) # KEPT: Prioritize numerical stability
             self.names = []
         else:
             other_lpi.deserialize()
@@ -50,10 +51,10 @@ class LpInstance(Freezable):
         num_cols = len(variables)
         
         if self.lp.getObjective() is not None:
-             c = self.lp.getAttr('Obj', variables)
+              c = self.lp.getAttr('Obj', variables)
         else:
-             c = []
-             
+              c = []
+              
         constrs = self.lp.getConstrs()
         A_list = []
         b_list = []
@@ -85,10 +86,11 @@ class LpInstance(Freezable):
         c, A, b, bounds, names = self.lp
 
         env = gp.Env(empty=True)
-        env.setParam('OutputFlag', 0)
+        env.setParam('OutputFlag', 0) # ADDED BACK: Silence Gurobi's console output
         env.start()
         
         self.lp = gp.Model(env=env)
+        self.lp.setParam('NumericFocus', 3) # KEPT: Prioritize numerical stability
         self.names = names
 
         num_vars = len(bounds)
