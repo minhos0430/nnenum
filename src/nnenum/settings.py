@@ -123,7 +123,7 @@ class Settings(metaclass=FreezableMeta):
 
         ####
         # generally it should be safe to add any linear layers to the whitelist
-        cls.ONNX_WHITELIST = ['Add', 'AveragePool', 'Constant', 'Concat', 'Conv', 'Flatten', 'Gather', \
+        cls.ONNX_WHITELIST = ['Add', 'AveragePool','BatchNormalization','ConvTranspose', 'Constant', 'Concat', 'Conv', 'Flatten', 'Gather', \
                               'Gemm', 'MatMul', 'Mul', 'Reshape', 'Relu', 'Shape', 'Sub', 'Unsqueeze', 'Slice', \
                               'Dropout']
 
